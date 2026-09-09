@@ -1,0 +1,85 @@
+name: Deploy to Hostinger
+
+on:
+  push:
+    branches:
+      - main
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: hostinger-production
+  cancel-in-progress: true
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Package static website
+        run: zip -r deploy.zip index.html styles.css assets fonts
+
+      - name: Request Hostinger upload credentials
+        id: upload
+        env:
+          HOSTINGER_API_TOKEN: ${{ secrets.HOSTINGER_API_TOKEN }}
+        run: |
+          response="$(curl --fail-with-body --silent --show-error \
+            --request POST \
+            --url https://developers.hostinger.com/api/hosting/v1/files/upload-urls \
+            --header "Authorization: Bearer ${HOSTINGER_API_TOKEN}" \
+            --header "Content-Type: application/json" \
+            --data '{"username":"u403911816","domain":"ianinho.com"}')"
+
+          upload_url="$(jq -r '.url // .data.url' <<<"${response}")"
+          auth_key="$(jq -r '.auth_key // .data.auth_key' <<<"${response}")"
+          rest_auth_key="$(jq -r '.rest_auth_key // .data.rest_auth_key' <<<"${response}")"
+
+          test -n "${upload_url}" && test "${upload_url}" != "null"
+          echo "::add-mask::${auth_key}"
+          echo "::add-mask::${rest_auth_key}"
+          echo "upload_url=${upload_url%/}/deploy.zip?override=true" >> "$GITHUB_OUTPUT"
+          echo "auth_key=${auth_key}" >> "$GITHUB_OUTPUT"
+          echo "rest_auth_key=${rest_auth_key}" >> "$GITHUB_OUTPUT"
+
+      - name: Upload website archive
+        env:
+          UPLOAD_URL: ${{ steps.upload.outputs.upload_url }}
+          AUTH_KEY: ${{ steps.upload.outputs.auth_key }}
+          REST_AUTH_KEY: ${{ steps.upload.outputs.rest_auth_key }}
+        run: |
+          size="$(stat -c%s deploy.zip)"
+
+          curl --fail-with-body --silent --show-error \
+            --request POST \
+            --url "${UPLOAD_URL}" \
+            --header "X-Auth: ${AUTH_KEY}" \
+            --header "X-Auth-Rest: ${REST_AUTH_KEY}" \
+            --header "Tus-Resumable: 1.0.0" \
+            --header "Upload-Length: ${size}" \
+            --header "Upload-Offset: 0"
+
+          curl --fail-with-body --silent --show-error \
+            --request PATCH \
+            --url "${UPLOAD_URL}" \
+            --header "X-Auth: ${AUTH_KEY}" \
+            --header "X-Auth-Rest: ${REST_AUTH_KEY}" \
+            --header "Tus-Resumable: 1.0.0" \
+            --header "Content-Type: application/offset+octet-stream" \
+            --header "Upload-Offset: 0" \
+            --data-binary @deploy.zip
+
+      - name: Deploy website on Hostinger
+        env:
+          HOSTINGER_API_TOKEN: ${{ secrets.HOSTINGER_API_TOKEN }}
+        run: |
+          curl --fail-with-body --silent --show-error \
+            --request POST \
+            --url https://developers.hostinger.com/api/hosting/v1/accounts/u403911816/websites/ianinho.com/deploy \
+            --header "Authorization: Bearer ${HOSTINGER_API_TOKEN}" \
+            --header "Content-Type: application/json" \
+            --data '{"archive_path":"deploy.zip"}'
